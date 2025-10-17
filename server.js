@@ -10,7 +10,7 @@ const port = process.env.PORT || 3000;
 // APIキーのチェック
 if (!process.env.OPENAI_API_KEY) {
   console.error("エラー: OPENAI_API_KEY が .env ファイルに設定されていません。");
-  process.exit(1);
+  process.exit(1); // ★ ログ追加: 起動時にAPIキーがない場合、Renderログにエラーを出力
 }
 
 const openai = new OpenAI({
@@ -18,11 +18,11 @@ const openai = new OpenAI({
 });
 
 // ミドルウェアの設定
-app.use(cors()); // CORSを許可
-app.use(express.json({ limit: '10mb' })); // リクエストボディのサイズ上限を増やす
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname)));
 
-// ルートエンドポイント (index.htmlを配信)
+// ルートエンドポイント
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -30,8 +30,12 @@ app.get('/', (req, res) => {
 // APIエンドポイント (AI処理)
 app.post('/api/process', async (req, res) => {
   const { titles } = req.body;
+  const batchSize = titles ? titles.length : 0; // ★ ログ用: バッチサイズを取得
+
+  console.log(`[Server] Received API request for ${batchSize} titles.`); // ★ ログ追加: リクエスト受信
 
   if (!titles || !Array.isArray(titles) || titles.length === 0) {
+    console.warn('[Server] Invalid request: Titles list is missing or empty.'); // ★ ログ追加: 不正なリクエスト
     return res.status(400).json({ error: '処理対象のタイトルリストが必要です。' });
   }
 
@@ -63,8 +67,9 @@ ${JSON.stringify(titles, null, 2)}
 `;
 
   try {
+    console.log(`[Server] Calling OpenAI API for ${batchSize} titles...`); // ★ ログ追加: AI呼び出し開始
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // ★ モデルを gpt-4o-mini に変更
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
@@ -78,46 +83,52 @@ ${JSON.stringify(titles, null, 2)}
       response_format: { type: "json_object" },
     });
 
-    // APIからのレスポンスをパース
+    console.log(`[Server] Received response from OpenAI for ${batchSize} titles.`); // ★ ログ追加: AI応答受信
     const responseContent = completion.choices[0].message.content;
-    
+
     let aiData;
     try {
         const parsedResponse = JSON.parse(responseContent);
-        
+
         if (Array.isArray(parsedResponse)) {
             aiData = parsedResponse;
         } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
-            // オブジェクトの最初のキーの値が配列であるかチェック
             const firstKey = Object.keys(parsedResponse)[0];
             if (firstKey && Array.isArray(parsedResponse[firstKey])) {
                 aiData = parsedResponse[firstKey];
             } else {
-                throw new Error("AIのレスポンスが期待したJSON配列形式ではありません。");
+                console.warn("[Server] AI response was an object but did not contain an array.", parsedResponse); // ★ ログ追加
+                aiData = [];
             }
         } else {
-             throw new Error("AIのレスポンスが期待したJSON配列形式ではありません。");
+             console.warn("[Server] AI response was not an array or object.", parsedResponse); // ★ ログ追加
+             aiData = [];
         }
-        
+
     } catch (e) {
-        console.error("AIレスポンスのパースに失敗:", responseContent, e.message);
-        throw new Error("AIのレスポンスをJSONとして解釈できませんでした。");
+        console.error("[Server] Failed to parse AI response:", responseContent, e.message); // ★ ログ追加: パース失敗
+        aiData = [];
     }
 
-
-    if (aiData.length !== titles.length) {
-        console.warn(`警告: AIの回答数(${aiData.length})がリクエスト数(${titles.length})と一致しません。`);
+    if (aiData.length === 0 && titles.length > 0) {
+        console.warn(`[Server] Warning: AI returned an empty array for ${titles.length} requested items.`); // ★ ログ追加: 空の応答
+    } else if (aiData.length !== titles.length) {
+        console.warn(`[Server] Warning: AI response count (${aiData.length}) does not match request count (${titles.length}).`); // ★ ログ追加: 件数不一致
     }
 
+    console.log(`[Server] Sending ${aiData.length} processed items back to client.`); // ★ ログ追加: フロントエンドへの応答
     res.json(aiData);
 
   } catch (error) {
-    console.error('OpenAI APIエラー:', error);
-    res.status(500).json({ error: 'AI処理中にエラーが発生しました。' });
+    // OpenAI API自体との通信エラー（キー間違い、レート制限など）
+    console.error('[Server] OpenAI API Error:', error.status, error.message); // ★ ログ追加: API通信エラー詳細
+    // エラーでも空配列を返し、フロントの処理を継続させる
+    res.status(200).json([]);
   }
 });
 
 // サーバー起動
 app.listen(port, () => {
-  console.log(`サーバーが http://localhost:${port} で起動しました`);
+  // ★ ログ変更: localhostではなく Render のポート番号を表示
+  console.log(`サーバーがポート ${port} で起動しました`);
 });
