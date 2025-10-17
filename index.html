@@ -1,292 +1,133 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI 音楽カタログ補完ツール</title>
-  
-  <script src="https://cdn.tailwindcss.com"></script>
-  
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-  
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/papaparse/5.4.1/papaparse.min.js"></script>
+require('dotenv').config();
+const express = require('express');
+const path = require('path');
+const { OpenAI } = require('openai');
+const cors = require('cors');
 
-  <style>
-    /* Noto Sans JP を適用 */
-    body, html {
-      font-family: 'Noto Sans JP', sans-serif;
-      background-color: #f8f7f7;
-    }
+const app = express();
+const port = process.env.PORT || 3000;
 
-    /* 標準ボタン（コア原則に基づく） */
-    .btn-primary {
-      display: inline-block;
-      font-weight: 500;
-      padding: 0.75rem 1.5rem;
-      border: 2px solid #1a1a1a;
-      background-color: transparent;
-      color: #1a1a1a;
-      text-decoration: none;
-      transition: all 0.2s ease-in-out;
-      cursor: pointer;
-    }
+// APIキーのチェック
+if (!process.env.OPENAI_API_KEY) {
+  console.error("エラー: OPENAI_API_KEY が .env ファイルに設定されていません。");
+  process.exit(1);
+}
 
-    .btn-primary:hover,
-    .btn-primary:focus {
-      background-color: #1a1a1a;
-      color: #f8f7f7;
-    }
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-    /* ファイル入力の見た目をボタンにするためのラッパー */
-    .file-input-wrapper {
-      position: relative;
-      overflow: hidden;
-      display: inline-block;
-    }
+// ミドルウェアの設定
+app.use(cors()); // CORSを許可
+app.use(express.json({ limit: '10mb' })); // リクエストボディのサイズ上限を増やす
+app.use(express.static(path.join(__dirname)));
 
-    .file-input-wrapper input[type=file] {
-      position: absolute;
-      left: 0;
-      top: 0;
-      opacity: 0;
-      width: 100%;
-      height: 100%;
-      cursor: pointer;
-    }
+// ルートエンドポイント (index.htmlを配信)
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
-    /* ローディングスピナー */
-    .loader {
-      border: 4px solid #f3f3f3;
-      border-top: 4px solid #343a40;
-      border-radius: 50%;
-      width: 40px;
-      height: 40px;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-  </style>
-</head>
-<body class="text-gray-900">
+// APIエンドポイント (AI処理)
+app.post('/api/process', async (req, res) => {
+  const { titles } = req.body;
 
-  <div class="container mx-auto max-w-2xl min-h-screen flex items-center justify-center p-6">
-    <div class="w-full bg-white shadow-sm border border-gray-200 p-8 text-center">
-      
-      <h1 class="text-2xl font-bold mb-4">AI 音楽カタログ補完ツール</h1>
-      <p class="text-gray-600 mb-8">
-        B列に商品名があり、D, E, F列のいずれかが空の行をAIが自動補完します。
-      </p>
+  if (!titles || !Array.isArray(titles) || titles.length === 0) {
+    return res.status(400).json({ error: '処理対象のタイトルリストが必要です。' });
+  }
 
-      <div id="app-state-container">
+  // OpenAIへのリクエスト用プロンプトを構築
+  const userPrompt = `
+以下のリストは、商品タイトルの文字列リストです。
+${JSON.stringify(titles, null, 2)}
+リスト内の各タイトル文字列について、以下のタスクを実行してください。
 
-        <div id="state-wait">
-          <div class="file-input-wrapper btn-primary">
-            <span>CSVファイルを選択</span>
-            <input type="file" id="csv-file-input" accept=".csv" onchange="handleFileSelect(event)">
-          </div>
-          <p class="text-sm text-gray-500 mt-4">
-            ※最大処理件数は1,000件です。
-          </p>
-        </div>
+アーティスト名 (artist):
+文字列から最も可能性の高いアーティスト名を英語で特定します。
+一般的なスペルミス（例: "Doubie Brothers"）は "The Doobie Brothers" のように修正します。
+リリースタイトル (release_title):
+文字列から正確なアルバム名やシングル名を英語で特定します。
+"CD", "Used", "Vinyl", "with Sleeve" などのステータスやフォーマットに関する余分な情報は削除します。
+原産国 (country_of_origin):
+まず、タイトル文字列内に国名（例: "Japan", "UK", "US"）が明記されているか確認し、あればそれを採用します。
+タイトル内に情報がない場合は、アーティスト名やリリースタイトル、型番（例: WPCR-2653）などを基に、そのリリースの主な製造国または販売国を推測します。
+特定が困難な場合は "Unknown" としてください。
+出力形式:
+抽出した情報を、以下のJSONオブジェクトのリスト（配列）形式で出力してください。 他の説明文や前置き（「承知いたしました」など）は一切含めず、JSONデータのみを返してください。
+[
+  {
+    "country_of_origin": "（原産国を英語で）",
+    "artist": "（アーティスト名を英語で）",
+    "release_title": "（リリースタイトルを英語で）"
+  }
+]
+`;
 
-        <div id="state-loading" class="hidden">
-          <div class="flex flex-col items-center justify-center">
-            <div class="loader mb-4"></div>
-            <p class="text-lg font-medium text-gray-700">AIがデータを解析中です...</p>
-            <p class="text-gray-500">（最大1〜2分程度かかる場合があります）</p>
-          </div>
-        </div>
-
-        <div id="state-complete" class="hidden">
-          <p class="text-lg font-medium text-green-700 mb-6">
-            AIによるデータ補完が完了しました。
-          </p>
-          <button id="download-btn" class="btn-primary">
-            補完済みCSVをダウンロード
-          </button>
-        </div>
-      </div>
-
-      <div id="error-message" class="text-red-600 font-medium mt-6"></div>
-
-    </div>
-  </div>
-
-  <script>
-    // グローバル変数（状態管理用）
-    let fullCsvData = []; // ヘッダーを含む元のCSVデータ
-    let processedRows = []; // AIで処理された行データ
-    let targetRowIndices = []; // AIで処理対象となった元の行インデックス
-
-    // 状態管理UI
-    const stateWait = document.getElementById('state-wait');
-    const stateLoading = document.getElementById('state-loading');
-    const stateComplete = document.getElementById('state-complete');
-    const errorMessage = document.getElementById('error-message');
-    const downloadBtn = document.getElementById('download-btn');
-    const fileInput = document.getElementById('csv-file-input');
-
-    // 状態変更関数
-    function setUIState(state) {
-      stateWait.classList.add('hidden');
-      stateLoading.classList.add('hidden');
-      stateComplete.classList.add('hidden');
-      errorMessage.textContent = ''; // 状態変更時にエラーをリセット
-
-      if (state === 'wait') {
-        stateWait.classList.remove('hidden');
-        fileInput.value = ''; // ファイル入力をリセット
-      } else if (state === 'loading') {
-        stateLoading.classList.remove('hidden');
-      } else if (state === 'complete') {
-        stateComplete.classList.remove('hidden');
-      }
-    }
-
-    // エラー表示関数
-    function showError(message) {
-      errorMessage.textContent = message;
-      setUIState('wait'); // エラー時は待機状態に戻す
-    }
-
-    // ファイル選択時の処理
-    async function handleFileSelect(event) {
-      const file = event.target.files[0];
-      if (!file) {
-        return;
-      }
-
-      setUIState('loading');
-
-      Papa.parse(file, {
-        encoding: "UTF-8",
-        header: false, // ヘッダーは扱わない（生データとして保持）
-        skipEmptyLines: true,
-        complete: async (results) => {
-          fullCsvData = results.data;
-          
-          if (fullCsvData.length === 0) {
-            showError("CSVファイルが空か、読み込めませんでした。");
-            return;
-          }
-          
-          processCsvData(fullCsvData);
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // 使用モデル
+      messages: [
+        {
+          role: "system",
+          content: "あなたは、音楽メディア（CD、レコードなど）の商品タイトル情報を解析するエキスパートAIです。提供されたテキスト文字列のリストを分析し、各項目から「アーティスト名」「リリースタイトル」「原産国」を正確に抽出するタスクを実行します。"
         },
-        error: (err) => {
-          showError(`CSVのパースに失敗しました: ${err.message}`);
+        {
+          role: "user",
+          content: userPrompt
         }
-      });
+      ],
+      response_format: { type: "json_object" },
+    });
+
+    // APIからのレスポンスをパース
+    const responseContent = completion.choices[0].message.content;
+
+    let aiData;
+    try {
+        const parsedResponse = JSON.parse(responseContent);
+
+        if (Array.isArray(parsedResponse)) {
+            aiData = parsedResponse;
+        } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
+            // オブジェクトの最初のキーの値が配列であるかチェック
+            const firstKey = Object.keys(parsedResponse)[0];
+            if (firstKey && Array.isArray(parsedResponse[firstKey])) {
+                aiData = parsedResponse[firstKey];
+            } else {
+                // オブジェクトではあるが期待する配列が見つからない場合、空の配列として扱う
+                console.warn("AIのレスポンスが期待したJSON配列形式ではありませんでした。オブジェクト内に配列が見つかりません。", parsedResponse);
+                aiData = [];
+            }
+        } else {
+             // JSONではあるが配列でもオブジェクトでもない場合
+             console.warn("AIのレスポンスがJSON配列でもオブジェクトでもありません。", parsedResponse);
+             aiData = [];
+        }
+
+    } catch (e) {
+        console.error("AIレスポンスのパースに失敗:", responseContent, e.message);
+        // パース失敗時は空の配列として扱う
+        aiData = [];
     }
 
-    // CSVデータのフィルタリングとAPI送信
-    async function processCsvData(data) {
-      const titlesToProcess = [];
-      targetRowIndices = []; // 処理対象のインデックスをリセット
-
-      // 1行目（ヘッダー）を除外してループ
-      for (let i = 1; i < data.length; i++) {
-        const row = data[i];
-        
-        // B列(idx:1), D列(idx:3), E列(idx:4), F列(idx:5)
-        const bCol = row[1] ? row[1].trim() : "";
-        const dCol = row[3] ? row[3].trim() : "";
-        const eCol = row[4] ? row[4].trim() : "";
-        const fCol = row[5] ? row[5].trim() : "";
-
-        // 条件: B列が空でなく、かつ D, E, F のいずれかが空
-        if (bCol !== "" && (dCol === "" || eCol === "" || fCol === "")) {
-          titlesToProcess.push(bCol);
-          targetRowIndices.push(i); // 元のデータ(fullCsvData)での行インデックスを保存
-        }
-      }
-
-      // 件数チェック
-      if (titlesToProcess.length === 0) {
-        showError("AIによる補完対象の行が見つかりませんでした。");
-        return;
-      }
-      if (titlesToProcess.length > 1000) {
-        showError(`処理対象が${titlesToProcess.length}件です。最大処理件数（1000件）を超えました。ファイルを分割してください。`);
-        return;
-      }
-
-      // サーバーにAI処理をリクエスト
-      try {
-        const response = await fetch('/api/process', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ titles: titlesToProcess }),
-        });
-
-        if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.error || 'サーバーでエラーが発生しました。');
-        }
-
-        processedRows = await response.json();
-
-        // 念のため回答数とリクエスト数が一致するか確認
-        if (processedRows.length !== titlesToProcess.length) {
-            console.warn("AIの回答数とリクエスト数が一致しません。");
-            // 処理は続行するが、コンソールに警告を出す
-        }
-
-        // 完了状態にし、ダウンロードボタンのイベントリスナーを設定
-        setUIState('complete');
-        downloadBtn.onclick = () => mergeAndDownload();
-
-      } catch (error) {
-        console.error('APIリクエストエラー:', error);
-        showError(`AI処理に失敗しました: ${error.message}`);
-      }
+    // AIが期待通りに応答しなかった場合（空配列になった場合）、エラーではなく空配列を返す
+    if (aiData.length === 0 && titles.length > 0) {
+        console.warn(`警告: AIからの応答が空でした。リクエスト数: ${titles.length}`);
+    } else if (aiData.length !== titles.length) {
+        console.warn(`警告: AIの回答数(${aiData.length})がリクエスト数(${titles.length})と一致しません。`);
+        // 不一致の場合でも処理を続行させる（部分的な結果でも返す）
     }
 
-    // データのマージとダウンロード
-    function mergeAndDownload() {
-      // 元のCSVデータ(fullCsvData)のコピーを作成
-      let finalData = JSON.parse(JSON.stringify(fullCsvData));
+    res.json(aiData);
 
-      // AIの回答(processedRows)を元のデータ(finalData)にマージ
-      processedRows.forEach((aiRow, index) => {
-        // 処理対象の元の行インデックスを取得
-        const originalIndex = targetRowIndices[index];
+  } catch (error) {
+    console.error('OpenAI APIエラー:', error);
+    // 500エラーではなく、エラーメッセージを含んだ空配列を返すことでフロントの処理を継続させる
+    res.status(200).json([]);
+    // res.status(500).json({ error: 'AI処理中にエラーが発生しました。' });
+  }
+});
 
-        if (finalData[originalIndex]) {
-          // D列(idx:3)に原産国
-          finalData[originalIndex][3] = aiRow.country_of_origin;
-          // E列(idx:4)にアーティスト名
-          finalData[originalIndex][4] = aiRow.artist;
-          // F列(idx:5)にリリースタイトル
-          finalData[originalIndex][5] = aiRow.release_title;
-        }
-      });
-
-      // PapaParseでCSV文字列に変換
-      const csvString = Papa.unparse(finalData);
-
-      // BOM (Byte Order Mark) を追加してUTF-8のExcel互換性を担保
-      const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-      const blob = new Blob([bom, csvString], { type: 'text/csv;charset=utf-8;' });
-      
-      const link = document.createElement('a');
-      const url = URL.createObjectURL(blob);
-      link.setAttribute('href', url);
-      link.setAttribute('download', 'processed_catalog.csv');
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
-      // ダウンロード後、初期状態に戻る
-      setUIState('wait');
-    }
-
-  </script>
-
-</body>
-</html>
+// サーバー起動
+app.listen(port, () => {
+  console.log(`サーバーが http://localhost:${port} で起動しました`);
+});
