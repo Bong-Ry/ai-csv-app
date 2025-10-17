@@ -9,6 +9,7 @@ const Papa = require('papaparse'); // ★ CSV解析用
 const app = express();
 const port = process.env.PORT || 3000;
 const BATCH_SIZE = 100; // バッチサイズ
+const MAX_PROCESS_LIMIT = 1000; // ★ 最大処理件数を定数化
 
 // ログ用のヘルパー
 const getTimestamp = () => new Date().toISOString();
@@ -173,7 +174,7 @@ app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
 
   // 2. AI処理対象のフィルタリング
   logInfo("Filtering rows for AI processing...");
-  const itemsToProcess = [];
+  let itemsToProcess = []; // ★ let に変更
   for (let i = 1; i < fullCsvData.length; i++) { // 1行目(i=0)はヘッダーと仮定
     const row = fullCsvData[i];
     const title = row[1] ? row[1].trim() : "";
@@ -187,26 +188,30 @@ app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
     }
   }
 
-  const totalItemsToProcess = itemsToProcess.length;
+  let totalItemsToProcess = itemsToProcess.length; // ★ let に変更
   logInfo(`Filtering complete. Found ${totalItemsToProcess} items to process.`);
+
+  // ★★★ ロジック変更点 ★★★
+  // 1000件を超えていたら、エラーではなく先頭1000件に絞り込む
+  if (totalItemsToProcess > MAX_PROCESS_LIMIT) {
+    logWarn(`Processing limit exceeded: ${totalItemsToProcess} items. Processing only the first ${MAX_PROCESS_LIMIT} items.`);
+    itemsToProcess = itemsToProcess.slice(0, MAX_PROCESS_LIMIT); // ★ 先頭1000件に絞り込む
+    totalItemsToProcess = itemsToProcess.length; // ★ 処理件数を更新
+  }
+  // ★★★ 変更点ここまで ★★★
 
   if (totalItemsToProcess === 0) {
     logWarn("No items found for AI processing. Returning original file.");
-    // ここで処理を中断し、元のCSVをそのまま返すか、エラーメッセージを返す
     // 今回は「処理対象なし」というメッセージを返す
     return res.status(400).json({ error: 'AIによる補完対象の行が見つかりませんでした。' });
   }
-  if (totalItemsToProcess > 1000) {
-    logError(`Processing limit exceeded: ${totalItemsToProcess} items. (Max 1000)`);
-    return res.status(400).json({ error: `処理対象が${totalItemsToProcess}件です。最大1000件を超えました。` });
-  }
-
+  
   // 3. バッチ処理の準備
   const batches = [];
   for (let i = 0; i < totalItemsToProcess; i += BATCH_SIZE) {
     batches.push(itemsToProcess.slice(i, i + BATCH_SIZE));
   }
-  logInfo(`Divided into ${batches.length} batches of size ${BATCH_SIZE}.`);
+  logInfo(`Divided ${totalItemsToProcess} items into ${batches.length} batches of size ${BATCH_SIZE}.`);
 
   // 4. AIバッチ処理の並列実行
   let processedItemsCount = 0;
@@ -239,11 +244,10 @@ app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
   let mergeCount = 0;
   allResults.forEach((aiRow, originalIndex) => {
     if (fullCsvData[originalIndex]) {
-      // 既存のデータを上書きしないようにチェック (現状のロジックでは不要だが念のため)
-      // D列 (col 3), E列 (col 4), F列 (col 5)
-      fullCsvData[originalIndex][3] = fullCsvData[originalIndex][3] || aiRow.country_of_origin;
-      fullCsvData[originalIndex][4] = fullCsvData[originalIndex][4] || aiRow.artist;
-      fullCsvData[originalIndex][5] = fullCsvData[originalIndex][5] || aiRow.release_title;
+      // 既存のデータを上書きしないようにチェック (空の場合のみAIの結果で埋める)
+      fullCsvData[originalIndex][3] = (fullCsvData[originalIndex][3] || "").trim() === "" ? aiRow.country_of_origin : fullCsvData[originalIndex][3];
+      fullCsvData[originalIndex][4] = (fullCsvData[originalIndex][4] || "").trim() === "" ? aiRow.artist : fullCsvData[originalIndex][4];
+      fullCsvData[originalIndex][5] = (fullCsvData[originalIndex][5] || "").trim() === "" ? aiRow.release_title : fullCsvData[originalIndex][5];
       mergeCount++;
     } else {
       logWarn(`Could not find original row data for index: ${originalIndex}`);
