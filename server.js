@@ -265,8 +265,12 @@ app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
     if (fullCsvData[originalIndex]) {
       // 既存のデータを上書きしないようにチェック (空の場合のみAIの結果で埋める)
       fullCsvData[originalIndex][3] = (fullCsvData[originalIndex][3] || "").trim() === "" ? aiRow.country_of_origin : fullCsvData[originalIndex][3];
-      fullCsvData[originalIndex][4] = (fullCsvData[originalIndex][4] || "").trim() === "" ? aiRow.artist : fullCsvData[originalIndex[4];
+      
+      // ★★★ 構文エラー修正点 ★★★
+      fullCsvData[originalIndex][4] = (fullCsvData[originalIndex][4] || "").trim() === "" ? aiRow.artist : fullCsvData[originalIndex][4];
       fullCsvData[originalIndex][5] = (fullCsvData[originalIndex][5] || "").trim() === "" ? aiRow.release_title : fullCsvData[originalIndex][5];
+      // ★★★ 修正ここまで ★★★
+      
       mergeCount++;
     } else {
       logWarn(`Could not find original row data for index: ${originalIndex}`);
