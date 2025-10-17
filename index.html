@@ -89,9 +89,9 @@
   <script>
     // --- グローバル変数 ---
     let fullCsvData = [];
-    let processedRowsMap = new Map(); // 結果を元のインデックスと紐付けて保持
+    let processedRowsMap = new Map();
     let targetRowIndices = [];
-    const BATCH_SIZE = 100; // 一度にAIに送る件数 (調整可能)
+    const BATCH_SIZE = 100;
 
     // --- UI要素 ---
     const stateWait = document.getElementById('state-wait');
@@ -107,6 +107,7 @@
 
     // --- UI状態管理 ---
     function setUIState(state) {
+      console.log(`[UI] Setting state to: ${state}`); // ★ ログ追加
       ['wait', 'loading', 'complete'].forEach(s => document.getElementById(`state-${s}`).classList.add('hidden'));
       errorMessage.textContent = '';
       if (state === 'wait') {
@@ -114,6 +115,7 @@
         fileInput.value = '';
         progressBar.style.width = '0%'; progressBar.textContent = '0%';
         loadingText.textContent = 'AIがデータを解析中です...';
+        progressSubtext.textContent = ''; // ★ サブテキストクリア
       } else if (state === 'loading') {
         stateLoading.classList.remove('hidden');
       } else if (state === 'complete') {
@@ -123,21 +125,26 @@
 
     // --- エラー表示 ---
     function showError(message) {
+      console.error(`[Error] ${message}`); // ★ ログ追加
       errorMessage.textContent = message;
       setUIState('wait');
     }
 
     // --- ファイル選択 ---
     async function handleFileSelect(event) {
+      console.log('[Event] File selected.'); // ★ ログ追加
       const file = event.target.files[0]; if (!file) return;
       setUIState('loading');
       progressSubtext.textContent = 'CSVファイルを読み込んでいます...';
+      console.log('[CSV] Parsing CSV file...'); // ★ ログ追加
 
       Papa.parse(file, {
         encoding: "UTF-8", header: false, skipEmptyLines: true,
         complete: async (results) => {
+          console.log('[CSV] CSV parsing complete.'); // ★ ログ追加
           fullCsvData = results.data;
           if (fullCsvData.length === 0) return showError("CSVファイルが空か、読み込めませんでした。");
+          console.log(`[CSV] Found ${fullCsvData.length} rows (including header).`); // ★ ログ追加
           processCsvData(fullCsvData);
         },
         error: (err) => showError(`CSVのパースに失敗: ${err.message}`)
@@ -145,33 +152,35 @@
     }
 
     // --- AI処理リクエスト (単一バッチ) ---
-    async function requestAiProcessing(batchTitles) {
+    async function requestAiProcessing(batchTitles, batchIndex) { // ★ batchIndex を追加
+        console.log(`[AI Request] Sending batch ${batchIndex + 1} (${batchTitles.length} items)...`); // ★ ログ追加
         try {
             const response = await fetch('/api/process', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ titles: batchTitles }),
             });
-            // サーバーエラー(500)でもJSONが返る想定だったが、空配列でハンドリング
+
             if (!response.ok) {
-                console.error(`サーバーエラー (${response.status}) バッチ: `, batchTitles);
+                console.error(`[AI Response Error] Server returned ${response.status} for batch ${batchIndex + 1}.`); // ★ ログ追加
                 return []; // エラー時は空の結果を返す
             }
             const result = await response.json();
-            // 結果が配列でない場合も空配列を返す
+            console.log(`[AI Response OK] Received ${result.length} results for batch ${batchIndex + 1}.`); // ★ ログ追加
             return Array.isArray(result) ? result : [];
         } catch (error) {
-            console.error('APIリクエスト中にエラー:', error);
+            console.error(`[AI Request Error] Network error for batch ${batchIndex + 1}:`, error); // ★ ログ追加
             return []; // 通信エラー時も空配列
         }
     }
 
     // --- CSVデータ処理 (バッチ分割と並列実行) ---
     async function processCsvData(data) {
-      const itemsToProcess = []; // { index: 元の行index, title: B列の値 }
-      targetRowIndices = []; // targetRowIndices は マージ処理で必要
+      console.log('[Processing] Starting CSV data processing...'); // ★ ログ追加
+      const itemsToProcess = [];
+      targetRowIndices = [];
 
-      // ヘッダーを除いて処理対象を抽出
+      console.log('[Processing] Filtering rows for AI processing...'); // ★ ログ追加
       for (let i = 1; i < data.length; i++) {
         const row = data[i];
         const title = row[1] ? row[1].trim() : "";
@@ -180,44 +189,60 @@
         const colF = row[5] ? row[5].trim() : "";
         if (title !== "" && (colD === "" || colE === "" || colF === "")) {
           itemsToProcess.push({ index: i, title: title });
-          targetRowIndices.push(i); // マージ用にインデックスを保持
+          targetRowIndices.push(i);
         }
       }
 
       const totalItems = itemsToProcess.length;
+      console.log(`[Processing] Found ${totalItems} items to process.`); // ★ ログ追加
       if (totalItems === 0) return showError("AIによる補完対象の行が見つかりませんでした。");
       if (totalItems > 1000) return showError(`処理対象が${totalItems}件です。最大1000件を超えました。`);
 
       loadingText.textContent = `AI処理中 (0 / ${totalItems} 件完了)`;
-      progressSubtext.textContent = `約 ${Math.ceil(totalItems / BATCH_SIZE)} バッチに分割して処理します。`;
+      const totalBatches = Math.ceil(totalItems / BATCH_SIZE);
+      progressSubtext.textContent = `約 ${totalBatches} バッチに分割して処理します。`;
       progressBar.style.width = '0%'; progressBar.textContent = '0%';
-      processedRowsMap.clear(); // 前回の結果をクリア
+      processedRowsMap.clear();
 
       let completedItems = 0;
       const batches = [];
       for (let i = 0; i < totalItems; i += BATCH_SIZE) {
         batches.push(itemsToProcess.slice(i, i + BATCH_SIZE));
       }
+      console.log(`[Processing] Divided into ${batches.length} batches of size ${BATCH_SIZE}.`); // ★ ログ追加
 
       // 各バッチを並列で処理
-      await Promise.all(batches.map(async (batch) => {
+      console.log('[Processing] Starting parallel batch processing...'); // ★ ログ追加
+      const batchPromises = batches.map(async (batch, batchIndex) => { // ★ batchIndex を追加
         const batchTitles = batch.map(item => item.title);
-        const batchResults = await requestAiProcessing(batchTitles);
+        const batchResults = await requestAiProcessing(batchTitles, batchIndex); // ★ batchIndex を渡す
 
         // 結果を元のインデックスと紐付けて保存
         batch.forEach((item, idx) => {
           // AIの応答がリクエスト数より少ない場合や空の場合に備える
-          processedRowsMap.set(item.index, batchResults[idx] || { country_of_origin: 'Error', artist: 'Error', release_title: 'Error' });
+          const aiResult = batchResults[idx] || { country_of_origin: 'AI Error', artist: 'AI Error', release_title: 'AI Error' };
+          processedRowsMap.set(item.index, aiResult);
+
+          // ★ 詳細ログ: 個々のアイテムの結果
+          // console.log(`[Result] Item Index ${item.index}: ${JSON.stringify(aiResult)}`);
+
+          // スレッドセーフではないが、進捗表示のためインクリメント
           completedItems++;
         });
 
-        // 進捗を更新
+        // 進捗を更新 (バッチ完了ごと)
         const progress = Math.round((completedItems / totalItems) * 100);
+        console.log(`[Progress] Batch ${batchIndex + 1} completed. Total completed: ${completedItems}/${totalItems} (${progress}%)`); // ★ ログ追加
+        // UI更新はメインスレッドで行うため、ここでは直接更新しない方が安全だが、簡易的に更新
         loadingText.textContent = `AI処理中 (${completedItems} / ${totalItems} 件完了)`;
         progressBar.style.width = `${progress}%`;
         progressBar.textContent = `${progress}%`;
-      }));
+      });
 
+      // すべてのバッチ処理が終わるのを待つ
+      await Promise.all(batchPromises);
+
+      console.log('[Processing] All batches completed.'); // ★ ログ追加
       // 完了処理
       completeMessage.textContent = `AIによるデータ補完が完了しました (${completedItems} / ${totalItems} 件)`;
       setUIState('complete');
@@ -226,17 +251,25 @@
 
     // --- 結果のマージとダウンロード ---
     function mergeAndDownload() {
+      console.log('[Download] Starting merge and download process...'); // ★ ログ追加
       let finalData = JSON.parse(JSON.stringify(fullCsvData)); // Deep copy
+      let mergeCount = 0; // ★ マージ件数カウント
 
       processedRowsMap.forEach((aiRow, originalIndex) => {
         if (finalData[originalIndex]) {
           finalData[originalIndex][3] = aiRow.country_of_origin; // D列
           finalData[originalIndex][4] = aiRow.artist;           // E列
           finalData[originalIndex][5] = aiRow.release_title;   // F列
+          mergeCount++;
+        } else {
+          console.warn(`[Download] Could not find original row data for index: ${originalIndex}`); // ★ ログ追加
         }
       });
+      console.log(`[Download] Merged ${mergeCount} AI results into original data.`); // ★ ログ追加
 
+      console.log('[Download] Generating CSV string...'); // ★ ログ追加
       const csvString = Papa.unparse(finalData);
+
       const bom = new Uint8Array([0xEF, 0xBB, 0xBF]); // BOM for Excel UTF-8
       const blob = new Blob([bom, csvString], { type: 'text/csv;charset=utf-8;' });
       
@@ -244,9 +277,11 @@
       link.href = URL.createObjectURL(blob);
       link.download = 'processed_catalog.csv';
       document.body.appendChild(link);
+      console.log('[Download] Triggering download...'); // ★ ログ追加
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(link.href);
+      console.log('[Download] Download finished.'); // ★ ログ追加
 
       setUIState('wait'); // 初期状態に戻る
     }
