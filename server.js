@@ -9,8 +9,9 @@ const port = process.env.PORT || 3000;
 
 // APIキーのチェック
 if (!process.env.OPENAI_API_KEY) {
+  // ★ ログ追加: 起動時にAPIキーがない場合、Renderログにエラーを出力
   console.error("エラー: OPENAI_API_KEY が .env ファイルに設定されていません。");
-  process.exit(1); // ★ ログ追加: 起動時にAPIキーがない場合、Renderログにエラーを出力
+  process.exit(1);
 }
 
 const openai = new OpenAI({
@@ -30,12 +31,15 @@ app.get('/', (req, res) => {
 // APIエンドポイント (AI処理)
 app.post('/api/process', async (req, res) => {
   const { titles } = req.body;
-  const batchSize = titles ? titles.length : 0; // ★ ログ用: バッチサイズを取得
+  // ★ ログ用: バッチサイズを取得
+  const batchSize = titles ? titles.length : 0;
 
-  console.log(`[Server] Received API request for ${batchSize} titles.`); // ★ ログ追加: リクエスト受信
+  // ★ ログ追加: リクエスト受信
+  console.log(`[Server] Received API request for ${batchSize} titles.`);
 
   if (!titles || !Array.isArray(titles) || titles.length === 0) {
-    console.warn('[Server] Invalid request: Titles list is missing or empty.'); // ★ ログ追加: 不正なリクエスト
+    // ★ ログ追加: 不正なリクエスト
+    console.warn('[Server] Invalid request: Titles list is missing or empty.');
     return res.status(400).json({ error: '処理対象のタイトルリストが必要です。' });
   }
 
@@ -67,7 +71,8 @@ ${JSON.stringify(titles, null, 2)}
 `;
 
   try {
-    console.log(`[Server] Calling OpenAI API for ${batchSize} titles...`); // ★ ログ追加: AI呼び出し開始
+    // ★ ログ追加: AI呼び出し開始
+    console.log(`[Server] Calling OpenAI API for ${batchSize} titles...`);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -83,7 +88,8 @@ ${JSON.stringify(titles, null, 2)}
       response_format: { type: "json_object" },
     });
 
-    console.log(`[Server] Received response from OpenAI for ${batchSize} titles.`); // ★ ログ追加: AI応答受信
+    // ★ ログ追加: AI応答受信
+    console.log(`[Server] Received response from OpenAI for ${batchSize} titles.`);
     const responseContent = completion.choices[0].message.content;
 
     let aiData;
@@ -97,31 +103,38 @@ ${JSON.stringify(titles, null, 2)}
             if (firstKey && Array.isArray(parsedResponse[firstKey])) {
                 aiData = parsedResponse[firstKey];
             } else {
-                console.warn("[Server] AI response was an object but did not contain an array.", parsedResponse); // ★ ログ追加
+                 // ★ ログ追加
+                console.warn("[Server] AI response was an object but did not contain an array.", parsedResponse);
                 aiData = [];
             }
         } else {
-             console.warn("[Server] AI response was not an array or object.", parsedResponse); // ★ ログ追加
+             // ★ ログ追加
+             console.warn("[Server] AI response was not an array or object.", parsedResponse);
              aiData = [];
         }
 
     } catch (e) {
-        console.error("[Server] Failed to parse AI response:", responseContent, e.message); // ★ ログ追加: パース失敗
+        // ★ ログ追加: パース失敗
+        console.error("[Server] Failed to parse AI response:", responseContent, e.message);
         aiData = [];
     }
 
     if (aiData.length === 0 && titles.length > 0) {
-        console.warn(`[Server] Warning: AI returned an empty array for ${titles.length} requested items.`); // ★ ログ追加: 空の応答
+        // ★ ログ追加: 空の応答
+        console.warn(`[Server] Warning: AI returned an empty array for ${titles.length} requested items.`);
     } else if (aiData.length !== titles.length) {
-        console.warn(`[Server] Warning: AI response count (${aiData.length}) does not match request count (${titles.length}).`); // ★ ログ追加: 件数不一致
+        // ★ ログ追加: 件数不一致
+        console.warn(`[Server] Warning: AI response count (${aiData.length}) does not match request count (${titles.length}).`);
     }
 
-    console.log(`[Server] Sending ${aiData.length} processed items back to client.`); // ★ ログ追加: フロントエンドへの応答
+    // ★ ログ追加: フロントエンドへの応答
+    console.log(`[Server] Sending ${aiData.length} processed items back to client.`);
     res.json(aiData);
 
   } catch (error) {
     // OpenAI API自体との通信エラー（キー間違い、レート制限など）
-    console.error('[Server] OpenAI API Error:', error.status, error.message); // ★ ログ追加: API通信エラー詳細
+    // ★ ログ追加: API通信エラー詳細
+    console.error('[Server] OpenAI API Error:', error.status, error.message);
     // エラーでも空配列を返し、フロントの処理を継続させる
     res.status(200).json([]);
   }
