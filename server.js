@@ -64,7 +64,7 @@ ${JSON.stringify(titles, null, 2)}
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini", // ★ モデルを gpt-4o-mini に変更
       messages: [
         {
           role: "system",
