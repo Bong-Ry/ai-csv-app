@@ -3,17 +3,30 @@ const express = require('express');
 const path = require('path');
 const { OpenAI } = require('openai');
 const cors = require('cors');
+const multer = require('multer'); // ★ ファイルアップロード用
+const Papa = require('papaparse'); // ★ CSV解析用
 
 const app = express();
 const port = process.env.PORT || 3000;
+const BATCH_SIZE = 100; // バッチサイズ
 
 // ログ用のヘルパー
 const getTimestamp = () => new Date().toISOString();
 
+// ログ関数
+const logInfo = (message, context = '') => {
+  console.log(`[${getTimestamp()}] [INFO] ${message}`, context);
+};
+const logWarn = (message, context = '') => {
+  console.warn(`[${getTimestamp()}] [WARN] ${message}`, context);
+};
+const logError = (message, error) => {
+  console.error(`[${getTimestamp()}] [ERROR] ${message}`, error ? error.message : '', error || '');
+};
+
 // APIキーのチェック
 if (!process.env.OPENAI_API_KEY) {
-  // ★ ログ修正: タイムスタンプとレベル追加
-  console.error(`[${getTimestamp()}] [ERROR] エラー: OPENAI_API_KEY が .env ファイルに設定されていません。`);
+  logError("エラー: OPENAI_API_KEY が .env ファイルに設定されていません。");
   process.exit(1);
 }
 
@@ -21,9 +34,13 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Multer の設定 (CSVファイルをメモリ上で扱う)
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
 // ミドルウェアの設定
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '10mb' })); // JSONリクエストの上限 (念のため残す)
 app.use(express.static(path.join(__dirname)));
 
 // ルートエンドポイント
@@ -31,22 +48,12 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// APIエンドポイント (AI処理)
-app.post('/api/process', async (req, res) => {
-  const { titles } = req.body;
-  // ★ ログ用: バッチサイズを取得
-  const batchSize = titles ? titles.length : 0;
+// ★★★ AI処理のコア関数 ★★★
+// (旧 /api/process のロジックを関数化)
+async function processBatchWithAI(titles, batchIndex) {
+  const batchSize = titles.length;
+  logInfo(`[AI Batch ${batchIndex}] Calling OpenAI API for ${batchSize} titles...`);
 
-  // ★ ログ修正: タイムスタンプとレベル追加
-  console.log(`[${getTimestamp()}] [INFO] [Server] Received API request for ${batchSize} titles.`);
-
-  if (!titles || !Array.isArray(titles) || titles.length === 0) {
-    // ★ ログ修正: タイムスタンプとレベル追加
-    console.warn(`[${getTimestamp()}] [WARN] [Server] Invalid request: Titles list is missing or empty.`);
-    return res.status(400).json({ error: '処理対象のタイトルリストが必要です。' });
-  }
-
-  // OpenAIへのリクエスト用プロンプトを構築
   const userPrompt = `
 以下のリストは、商品タイトルの文字列リストです。
 ${JSON.stringify(titles, null, 2)}
@@ -74,8 +81,6 @@ ${JSON.stringify(titles, null, 2)}
 `;
 
   try {
-    // ★ ログ修正: タイムスタンプとレベル追加
-    console.log(`[${getTimestamp()}] [INFO] [Server] Calling OpenAI API for ${batchSize} titles...`);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -83,68 +88,183 @@ ${JSON.stringify(titles, null, 2)}
           role: "system",
           content: "あなたは、音楽メディア（CD、レコードなど）の商品タイトル情報を解析するエキスパートAIです。提供されたテキスト文字列のリストを分析し、各項目から「アーティスト名」「リリースタイトル」「原産国」を正確に抽出するタスクを実行します。"
         },
-        {
-          role: "user",
-          content: userPrompt
-        }
+        { role: "user", content: userPrompt }
       ],
       response_format: { type: "json_object" },
     });
 
-    // ★ ログ修正: タイムスタンプとレベル追加
-    console.log(`[${getTimestamp()}] [INFO] [Server] Received response from OpenAI for ${batchSize} titles.`);
+    logInfo(`[AI Batch ${batchIndex}] Received response from OpenAI.`);
     const responseContent = completion.choices[0].message.content;
 
     let aiData;
     try {
-        const parsedResponse = JSON.parse(responseContent);
-
-        if (Array.isArray(parsedResponse)) {
-            aiData = parsedResponse;
-        } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
-            const firstKey = Object.keys(parsedResponse)[0];
-            if (firstKey && Array.isArray(parsedResponse[firstKey])) {
-                aiData = parsedResponse[firstKey];
-            } else {
-                 // ★ ログ修正: タイムスタンプとレベル追加
-                console.warn(`[${getTimestamp()}] [WARN] [Server] AI response was an object but did not contain an array.`, parsedResponse);
-                aiData = [];
-            }
+      const parsedResponse = JSON.parse(responseContent);
+      if (Array.isArray(parsedResponse)) {
+        aiData = parsedResponse;
+      } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
+        const firstKey = Object.keys(parsedResponse)[0];
+        if (firstKey && Array.isArray(parsedResponse[firstKey])) {
+          aiData = parsedResponse[firstKey];
         } else {
-             // ★ ログ修正: タイムスタンプとレベル追加
-             console.warn(`[${getTimestamp()}] [WARN] [Server] AI response was not an array or object.`, parsedResponse);
-             aiData = [];
+          logWarn(`[AI Batch ${batchIndex}] AI response was object, but not valid array.`, parsedResponse);
+          aiData = [];
         }
-
-    } catch (e) {
-        // ★ ログ修正: タイムスタンプとレベル追加
-        console.error(`[${getTimestamp()}] [ERROR] [Server] Failed to parse AI response:`, responseContent, e.message);
+      } else {
+        logWarn(`[AI Batch ${batchIndex}] AI response was not array or object.`, parsedResponse);
         aiData = [];
+      }
+    } catch (e) {
+      logError(`[AI Batch ${batchIndex}] Failed to parse AI JSON response:`, e);
+      aiData = [];
     }
 
-    if (aiData.length === 0 && titles.length > 0) {
-        // ★ ログ修正: タイムスタンプとレベル追加
-        console.warn(`[${getTimestamp()}] [WARN] [Server] Warning: AI returned an empty array for ${titles.length} requested items.`);
-    } else if (aiData.length !== titles.length) {
-        // ★ ログ修正: タイムスタンプとレベル追加
-        console.warn(`[${getTimestamp()}] [WARN] [Server] Warning: AI response count (${aiData.length}) does not match request count (${titles.length}).`);
+    // AIの応答がリクエスト数より少ない場合、エラーとして扱う
+    if (aiData.length < titles.length) {
+      logWarn(`[AI Batch ${batchIndex}] AI response count (${aiData.length}) mismatch request count (${titles.length}). Filling with errors.`);
+      // 足りない分をエラーで埋める (インデックスがズレないように)
+      const errorResult = { country_of_origin: 'AI Error', artist: 'AI Error', release_title: 'AI Error' };
+      while (aiData.length < titles.length) {
+        aiData.push(errorResult);
+      }
     }
-
-    // ★ ログ修正: タイムスタンプとレベル追加
-    console.log(`[${getTimestamp()}] [INFO] [Server] Sending ${aiData.length} processed items back to client.`);
-    res.json(aiData);
+    return aiData;
 
   } catch (error) {
-    // OpenAI API自体との通信エラー（キー間違い、レート制限など）
-    // ★ ログ修正: タイムスタンプとレベル追加
-    console.error(`[${getTimestamp()}] [ERROR] [Server] OpenAI API Error:`, error.status, error.message);
-    // エラーでも空配列を返し、フロントの処理を継続させる
-    res.status(200).json([]);
+    logError(`[AI Batch ${batchIndex}] OpenAI API Error:`, error);
+    // APIエラー時は、リクエストされた件数分のエラーオブジェクト配列を返す
+    return new Array(titles.length).fill({
+      country_of_origin: 'API Error',
+      artist: 'API Error',
+      release_title: 'API Error'
+    });
   }
+}
+
+// ★★★ 新しいメインエンドポイント (CSVアップロード＆処理) ★★★
+app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
+  logInfo("Received file upload request.");
+
+  if (!req.file) {
+    logWarn("File upload failed: No file provided.");
+    return res.status(400).json({ error: 'ファイルが提供されていません。' });
+  }
+
+  // ファイルをメモリから文字列に変換
+  const csvString = req.file.buffer.toString('utf8');
+  logInfo(`File received: ${req.file.originalname}, Size: ${req.file.size} bytes.`);
+
+  // 1. CSV解析
+  let fullCsvData;
+  try {
+    logInfo("Parsing CSV data...");
+    const results = Papa.parse(csvString, {
+      skipEmptyLines: true,
+    });
+    fullCsvData = results.data;
+    if (fullCsvData.length === 0) {
+      logWarn("CSV parsing resulted in 0 rows.");
+      return res.status(400).json({ error: 'CSVファイルが空か、読み込めませんでした。' });
+    }
+    logInfo(`CSV parsing complete. Found ${fullCsvData.length} total rows (including header).`);
+  } catch (parseError) {
+    logError("CSV parsing failed:", parseError);
+    return res.status(500).json({ error: 'CSVの解析に失敗しました。' });
+  }
+
+  // 2. AI処理対象のフィルタリング
+  logInfo("Filtering rows for AI processing...");
+  const itemsToProcess = [];
+  for (let i = 1; i < fullCsvData.length; i++) { // 1行目(i=0)はヘッダーと仮定
+    const row = fullCsvData[i];
+    const title = row[1] ? row[1].trim() : "";
+    const colD = row[3] ? row[3].trim() : "";
+    const colE = row[4] ? row[4].trim() : "";
+    const colF = row[5] ? row[5].trim() : "";
+    
+    // B列(title)があり、D, E, Fのいずれかが空なら処理対象
+    if (title !== "" && (colD === "" || colE === "" || colF === "")) {
+      itemsToProcess.push({ originalIndex: i, title: title });
+    }
+  }
+
+  const totalItemsToProcess = itemsToProcess.length;
+  logInfo(`Filtering complete. Found ${totalItemsToProcess} items to process.`);
+
+  if (totalItemsToProcess === 0) {
+    logWarn("No items found for AI processing. Returning original file.");
+    // ここで処理を中断し、元のCSVをそのまま返すか、エラーメッセージを返す
+    // 今回は「処理対象なし」というメッセージを返す
+    return res.status(400).json({ error: 'AIによる補完対象の行が見つかりませんでした。' });
+  }
+  if (totalItemsToProcess > 1000) {
+    logError(`Processing limit exceeded: ${totalItemsToProcess} items. (Max 1000)`);
+    return res.status(400).json({ error: `処理対象が${totalItemsToProcess}件です。最大1000件を超えました。` });
+  }
+
+  // 3. バッチ処理の準備
+  const batches = [];
+  for (let i = 0; i < totalItemsToProcess; i += BATCH_SIZE) {
+    batches.push(itemsToProcess.slice(i, i + BATCH_SIZE));
+  }
+  logInfo(`Divided into ${batches.length} batches of size ${BATCH_SIZE}.`);
+
+  // 4. AIバッチ処理の並列実行
+  let processedItemsCount = 0;
+  const allResults = new Map(); // Map<originalIndex, aiResult>
+
+  const batchPromises = batches.map(async (batch, batchIndex) => {
+    const batchTitles = batch.map(item => item.title);
+    
+    // AI処理実行
+    const aiResults = await processBatchWithAI(batchTitles, batchIndex + 1);
+
+    // 結果を元のインデックスと紐付け
+    batch.forEach((item, idx) => {
+      allResults.set(item.originalIndex, aiResults[idx] || {});
+      processedItemsCount++;
+    });
+    logInfo(`[Progress] Batch ${batchIndex + 1}/${batches.length} complete. Total processed: ${processedItemsCount}/${totalItemsToProcess}`);
+  });
+
+  try {
+    await Promise.all(batchPromises);
+    logInfo("All AI batches completed.");
+  } catch (batchError) {
+    logError("Error during parallel batch processing:", batchError);
+    // エラーが発生しても、処理できた分だけで続行する（エラー内容はAI結果に含まれる）
+  }
+
+  // 5. 元データとAI結果のマージ
+  logInfo("Merging AI results into original CSV data...");
+  let mergeCount = 0;
+  allResults.forEach((aiRow, originalIndex) => {
+    if (fullCsvData[originalIndex]) {
+      // 既存のデータを上書きしないようにチェック (現状のロジックでは不要だが念のため)
+      // D列 (col 3), E列 (col 4), F列 (col 5)
+      fullCsvData[originalIndex][3] = fullCsvData[originalIndex][3] || aiRow.country_of_origin;
+      fullCsvData[originalIndex][4] = fullCsvData[originalIndex][4] || aiRow.artist;
+      fullCsvData[originalIndex][5] = fullCsvData[originalIndex][5] || aiRow.release_title;
+      mergeCount++;
+    } else {
+      logWarn(`Could not find original row data for index: ${originalIndex}`);
+    }
+  });
+  logInfo(`Merging complete. Merged ${mergeCount} items.`);
+
+  // 6. CSV文字列に変換してクライアントに返送
+  logInfo("Unparsing data back to CSV string.");
+  const outputCsvString = Papa.unparse(fullCsvData);
+
+  logInfo("Sending processed CSV file back to client.");
+  // クライアント側でファイルとしてダウンロードさせるためのヘッダー設定
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="processed_catalog.csv"');
+  // BOM (バイトオーダーマーク) を先頭に追加 (Excelでの文字化け対策)
+  const bom = '\uFEFF';
+  res.status(200).send(bom + outputCsvString);
 });
 
 // サーバー起動
 app.listen(port, () => {
-  // ★ ログ修正: タイムスタンプとレベル追加
-  console.log(`[${getTimestamp()}] [INFO] サーバーがポート ${port} で起動しました`);
+  logInfo(`サーバーがポート ${port} で起動しました`);
 });
