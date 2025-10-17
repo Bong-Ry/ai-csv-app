@@ -1,4 +1,4 @@
-require('dotenv').config();
+krequire('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { OpenAI } = require('openai');
@@ -53,7 +53,6 @@ ${JSON.stringify(titles, null, 2)}
 特定が困難な場合は "Unknown" としてください。
 出力形式:
 抽出した情報を、以下のJSONオブジェクトのリスト（配列）形式で出力してください。 他の説明文や前置き（「承知いたしました」など）は一切含めず、JSONデータのみを返してください。
-JSON
 [
   {
     "country_of_origin": "（原産国を英語で）",
@@ -65,7 +64,7 @@ JSON
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o", // または "gpt-3.5-turbo" など
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
@@ -81,15 +80,11 @@ JSON
 
     // APIからのレスポンスをパース
     const responseContent = completion.choices[0].message.content;
-    // JSON形式で返ってくることを期待しているが、AIの仕様上、キーを持つJSONオブジェクトで返ってくる可能性がある
-    //（例: { "results": [...] } ）。プロンプトでは配列そのものを要求しているため、パースを試みる。
     
     let aiData;
     try {
-        // まず、レスポンスがJSON文字列そのものとしてパースを試みる
         const parsedResponse = JSON.parse(responseContent);
         
-        // プロンプトでは配列を要求したが、安全のためオブジェクトで返ってきた場合も考慮
         if (Array.isArray(parsedResponse)) {
             aiData = parsedResponse;
         } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
