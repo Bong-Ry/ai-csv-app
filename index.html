@@ -1,133 +1,257 @@
-require('dotenv').config();
-const express = require('express');
-const path = require('path');
-const { OpenAI } = require('openai');
-const cors = require('cors');
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 音楽カタログ補完ツール</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/papaparse/5.4.1/papaparse.min.js"></script>
 
-const app = express();
-const port = process.env.PORT || 3000;
+  <style>
+    body, html {
+      font-family: 'Noto Sans JP', sans-serif;
+      background-color: #f8f7f7;
+    }
+    .btn-primary {
+      display: inline-block; font-weight: 500; padding: 0.75rem 1.5rem; border: 2px solid #1a1a1a;
+      background-color: transparent; color: #1a1a1a; text-decoration: none;
+      transition: all 0.2s ease-in-out; cursor: pointer;
+    }
+    .btn-primary:hover, .btn-primary:focus { background-color: #1a1a1a; color: #f8f7f7; }
+    .file-input-wrapper { position: relative; overflow: hidden; display: inline-block; }
+    .file-input-wrapper input[type=file] {
+      position: absolute; left: 0; top: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer;
+    }
+    .loader {
+      border: 4px solid #f3f3f3; border-top: 4px solid #343a40; border-radius: 50%;
+      width: 40px; height: 40px; animation: spin 1s linear infinite;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    /* プログレスバー */
+    .progress-bar-container { width: 100%; background-color: #e9ecef; border-radius: 0.25rem; overflow: hidden; height: 1.5rem; margin-top: 1rem; }
+    .progress-bar { background-color: #4CAF50; height: 100%; width: 0%; transition: width 0.3s ease-in-out; text-align: center; color: white; line-height: 1.5rem; font-weight: 500; }
+  </style>
+</head>
+<body class="text-gray-900">
 
-// APIキーのチェック
-if (!process.env.OPENAI_API_KEY) {
-  console.error("エラー: OPENAI_API_KEY が .env ファイルに設定されていません。");
-  process.exit(1);
-}
+  <div class="container mx-auto max-w-2xl min-h-screen flex items-center justify-center p-6">
+    <div class="w-full bg-white shadow-sm border border-gray-200 p-8 text-center">
+      
+      <h1 class="text-2xl font-bold mb-4">AI 音楽カタログ補完ツール</h1>
+      <p class="text-gray-600 mb-8">
+        CSVファイルの商品名を元に、不足している情報をAIが自動補完します。
+      </p>
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+      <div id="app-state-container">
 
-// ミドルウェアの設定
-app.use(cors()); // CORSを許可
-app.use(express.json({ limit: '10mb' })); // リクエストボディのサイズ上限を増やす
-app.use(express.static(path.join(__dirname)));
+        <div id="state-wait">
+          <div class="file-input-wrapper btn-primary">
+            <span>CSVファイルを選択</span>
+            <input type="file" id="csv-file-input" accept=".csv" onchange="handleFileSelect(event)">
+          </div>
+          <p class="text-sm text-gray-500 mt-4">
+            ※最大処理件数は1,000件です。
+          </p>
+        </div>
 
-// ルートエンドポイント (index.htmlを配信)
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
+        <div id="state-loading" class="hidden">
+          <div class="flex flex-col items-center justify-center">
+            <div class="loader mb-4"></div>
+            <p id="loading-text" class="text-lg font-medium text-gray-700">AIがデータを解析中です...</p>
+            <p id="progress-subtext" class="text-gray-500"></p>
+            <div class="progress-bar-container">
+              <div id="progress-bar" class="progress-bar">0%</div>
+            </div>
+          </div>
+        </div>
 
-// APIエンドポイント (AI処理)
-app.post('/api/process', async (req, res) => {
-  const { titles } = req.body;
+        <div id="state-complete" class="hidden">
+          <p id="complete-message" class="text-lg font-medium text-green-700 mb-6">
+            AIによるデータ補完が完了しました。
+          </p>
+          <button id="download-btn" class="btn-primary">
+            補完済みCSVをダウンロード
+          </button>
+        </div>
+      </div>
 
-  if (!titles || !Array.isArray(titles) || titles.length === 0) {
-    return res.status(400).json({ error: '処理対象のタイトルリストが必要です。' });
-  }
+      <div id="error-message" class="text-red-600 font-medium mt-6"></div>
 
-  // OpenAIへのリクエスト用プロンプトを構築
-  const userPrompt = `
-以下のリストは、商品タイトルの文字列リストです。
-${JSON.stringify(titles, null, 2)}
-リスト内の各タイトル文字列について、以下のタスクを実行してください。
+    </div>
+  </div>
 
-アーティスト名 (artist):
-文字列から最も可能性の高いアーティスト名を英語で特定します。
-一般的なスペルミス（例: "Doubie Brothers"）は "The Doobie Brothers" のように修正します。
-リリースタイトル (release_title):
-文字列から正確なアルバム名やシングル名を英語で特定します。
-"CD", "Used", "Vinyl", "with Sleeve" などのステータスやフォーマットに関する余分な情報は削除します。
-原産国 (country_of_origin):
-まず、タイトル文字列内に国名（例: "Japan", "UK", "US"）が明記されているか確認し、あればそれを採用します。
-タイトル内に情報がない場合は、アーティスト名やリリースタイトル、型番（例: WPCR-2653）などを基に、そのリリースの主な製造国または販売国を推測します。
-特定が困難な場合は "Unknown" としてください。
-出力形式:
-抽出した情報を、以下のJSONオブジェクトのリスト（配列）形式で出力してください。 他の説明文や前置き（「承知いたしました」など）は一切含めず、JSONデータのみを返してください。
-[
-  {
-    "country_of_origin": "（原産国を英語で）",
-    "artist": "（アーティスト名を英語で）",
-    "release_title": "（リリースタイトルを英語で）"
-  }
-]
-`;
+  <script>
+    // --- グローバル変数 ---
+    let fullCsvData = [];
+    let processedRowsMap = new Map(); // 結果を元のインデックスと紐付けて保持
+    let targetRowIndices = [];
+    const BATCH_SIZE = 100; // 一度にAIに送る件数 (調整可能)
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // 使用モデル
-      messages: [
-        {
-          role: "system",
-          content: "あなたは、音楽メディア（CD、レコードなど）の商品タイトル情報を解析するエキスパートAIです。提供されたテキスト文字列のリストを分析し、各項目から「アーティスト名」「リリースタイトル」「原産国」を正確に抽出するタスクを実行します。"
+    // --- UI要素 ---
+    const stateWait = document.getElementById('state-wait');
+    const stateLoading = document.getElementById('state-loading');
+    const stateComplete = document.getElementById('state-complete');
+    const errorMessage = document.getElementById('error-message');
+    const downloadBtn = document.getElementById('download-btn');
+    const fileInput = document.getElementById('csv-file-input');
+    const loadingText = document.getElementById('loading-text');
+    const progressSubtext = document.getElementById('progress-subtext');
+    const progressBar = document.getElementById('progress-bar');
+    const completeMessage = document.getElementById('complete-message');
+
+    // --- UI状態管理 ---
+    function setUIState(state) {
+      ['wait', 'loading', 'complete'].forEach(s => document.getElementById(`state-${s}`).classList.add('hidden'));
+      errorMessage.textContent = '';
+      if (state === 'wait') {
+        stateWait.classList.remove('hidden');
+        fileInput.value = '';
+        progressBar.style.width = '0%'; progressBar.textContent = '0%';
+        loadingText.textContent = 'AIがデータを解析中です...';
+      } else if (state === 'loading') {
+        stateLoading.classList.remove('hidden');
+      } else if (state === 'complete') {
+        stateComplete.classList.remove('hidden');
+      }
+    }
+
+    // --- エラー表示 ---
+    function showError(message) {
+      errorMessage.textContent = message;
+      setUIState('wait');
+    }
+
+    // --- ファイル選択 ---
+    async function handleFileSelect(event) {
+      const file = event.target.files[0]; if (!file) return;
+      setUIState('loading');
+      progressSubtext.textContent = 'CSVファイルを読み込んでいます...';
+
+      Papa.parse(file, {
+        encoding: "UTF-8", header: false, skipEmptyLines: true,
+        complete: async (results) => {
+          fullCsvData = results.data;
+          if (fullCsvData.length === 0) return showError("CSVファイルが空か、読み込めませんでした。");
+          processCsvData(fullCsvData);
         },
-        {
-          role: "user",
-          content: userPrompt
-        }
-      ],
-      response_format: { type: "json_object" },
-    });
+        error: (err) => showError(`CSVのパースに失敗: ${err.message}`)
+      });
+    }
 
-    // APIからのレスポンスをパース
-    const responseContent = completion.choices[0].message.content;
-
-    let aiData;
-    try {
-        const parsedResponse = JSON.parse(responseContent);
-
-        if (Array.isArray(parsedResponse)) {
-            aiData = parsedResponse;
-        } else if (typeof parsedResponse === 'object' && parsedResponse !== null) {
-            // オブジェクトの最初のキーの値が配列であるかチェック
-            const firstKey = Object.keys(parsedResponse)[0];
-            if (firstKey && Array.isArray(parsedResponse[firstKey])) {
-                aiData = parsedResponse[firstKey];
-            } else {
-                // オブジェクトではあるが期待する配列が見つからない場合、空の配列として扱う
-                console.warn("AIのレスポンスが期待したJSON配列形式ではありませんでした。オブジェクト内に配列が見つかりません。", parsedResponse);
-                aiData = [];
+    // --- AI処理リクエスト (単一バッチ) ---
+    async function requestAiProcessing(batchTitles) {
+        try {
+            const response = await fetch('/api/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ titles: batchTitles }),
+            });
+            // サーバーエラー(500)でもJSONが返る想定だったが、空配列でハンドリング
+            if (!response.ok) {
+                console.error(`サーバーエラー (${response.status}) バッチ: `, batchTitles);
+                return []; // エラー時は空の結果を返す
             }
-        } else {
-             // JSONではあるが配列でもオブジェクトでもない場合
-             console.warn("AIのレスポンスがJSON配列でもオブジェクトでもありません。", parsedResponse);
-             aiData = [];
+            const result = await response.json();
+            // 結果が配列でない場合も空配列を返す
+            return Array.isArray(result) ? result : [];
+        } catch (error) {
+            console.error('APIリクエスト中にエラー:', error);
+            return []; // 通信エラー時も空配列
         }
-
-    } catch (e) {
-        console.error("AIレスポンスのパースに失敗:", responseContent, e.message);
-        // パース失敗時は空の配列として扱う
-        aiData = [];
     }
 
-    // AIが期待通りに応答しなかった場合（空配列になった場合）、エラーではなく空配列を返す
-    if (aiData.length === 0 && titles.length > 0) {
-        console.warn(`警告: AIからの応答が空でした。リクエスト数: ${titles.length}`);
-    } else if (aiData.length !== titles.length) {
-        console.warn(`警告: AIの回答数(${aiData.length})がリクエスト数(${titles.length})と一致しません。`);
-        // 不一致の場合でも処理を続行させる（部分的な結果でも返す）
+    // --- CSVデータ処理 (バッチ分割と並列実行) ---
+    async function processCsvData(data) {
+      const itemsToProcess = []; // { index: 元の行index, title: B列の値 }
+      targetRowIndices = []; // targetRowIndices は マージ処理で必要
+
+      // ヘッダーを除いて処理対象を抽出
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const title = row[1] ? row[1].trim() : "";
+        const colD = row[3] ? row[3].trim() : "";
+        const colE = row[4] ? row[4].trim() : "";
+        const colF = row[5] ? row[5].trim() : "";
+        if (title !== "" && (colD === "" || colE === "" || colF === "")) {
+          itemsToProcess.push({ index: i, title: title });
+          targetRowIndices.push(i); // マージ用にインデックスを保持
+        }
+      }
+
+      const totalItems = itemsToProcess.length;
+      if (totalItems === 0) return showError("AIによる補完対象の行が見つかりませんでした。");
+      if (totalItems > 1000) return showError(`処理対象が${totalItems}件です。最大1000件を超えました。`);
+
+      loadingText.textContent = `AI処理中 (0 / ${totalItems} 件完了)`;
+      progressSubtext.textContent = `約 ${Math.ceil(totalItems / BATCH_SIZE)} バッチに分割して処理します。`;
+      progressBar.style.width = '0%'; progressBar.textContent = '0%';
+      processedRowsMap.clear(); // 前回の結果をクリア
+
+      let completedItems = 0;
+      const batches = [];
+      for (let i = 0; i < totalItems; i += BATCH_SIZE) {
+        batches.push(itemsToProcess.slice(i, i + BATCH_SIZE));
+      }
+
+      // 各バッチを並列で処理
+      await Promise.all(batches.map(async (batch) => {
+        const batchTitles = batch.map(item => item.title);
+        const batchResults = await requestAiProcessing(batchTitles);
+
+        // 結果を元のインデックスと紐付けて保存
+        batch.forEach((item, idx) => {
+          // AIの応答がリクエスト数より少ない場合や空の場合に備える
+          processedRowsMap.set(item.index, batchResults[idx] || { country_of_origin: 'Error', artist: 'Error', release_title: 'Error' });
+          completedItems++;
+        });
+
+        // 進捗を更新
+        const progress = Math.round((completedItems / totalItems) * 100);
+        loadingText.textContent = `AI処理中 (${completedItems} / ${totalItems} 件完了)`;
+        progressBar.style.width = `${progress}%`;
+        progressBar.textContent = `${progress}%`;
+      }));
+
+      // 完了処理
+      completeMessage.textContent = `AIによるデータ補完が完了しました (${completedItems} / ${totalItems} 件)`;
+      setUIState('complete');
+      downloadBtn.onclick = () => mergeAndDownload();
     }
 
-    res.json(aiData);
+    // --- 結果のマージとダウンロード ---
+    function mergeAndDownload() {
+      let finalData = JSON.parse(JSON.stringify(fullCsvData)); // Deep copy
 
-  } catch (error) {
-    console.error('OpenAI APIエラー:', error);
-    // 500エラーではなく、エラーメッセージを含んだ空配列を返すことでフロントの処理を継続させる
-    res.status(200).json([]);
-    // res.status(500).json({ error: 'AI処理中にエラーが発生しました。' });
-  }
-});
+      processedRowsMap.forEach((aiRow, originalIndex) => {
+        if (finalData[originalIndex]) {
+          finalData[originalIndex][3] = aiRow.country_of_origin; // D列
+          finalData[originalIndex][4] = aiRow.artist;           // E列
+          finalData[originalIndex][5] = aiRow.release_title;   // F列
+        }
+      });
 
-// サーバー起動
-app.listen(port, () => {
-  console.log(`サーバーが http://localhost:${port} で起動しました`);
-});
+      const csvString = Papa.unparse(finalData);
+      const bom = new Uint8Array([0xEF, 0xBB, 0xBF]); // BOM for Excel UTF-8
+      const blob = new Blob([bom, csvString], { type: 'text/csv;charset=utf-8;' });
+      
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'processed_catalog.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+
+      setUIState('wait'); // 初期状態に戻る
+    }
+
+  </script>
+
+</body>
+</html>
