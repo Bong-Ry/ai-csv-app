@@ -9,7 +9,7 @@ const Papa = require('papaparse'); // ★ CSV解析用
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ★★★ 変更点 ★★★
+// ★★★ 変更点はありません (元の設定を維持) ★★★
 const BATCH_SIZE = 50; // 100から50に変更
 // ★★★ 変更ここまで ★★★
 
@@ -156,7 +156,7 @@ ${JSON.stringify(titles, null, 2)}
   }
 }
 
-// ★★★ メインエンドポイント (変更なし) ★★★
+// ★★★ メインエンドポイント ★★★
 app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
   logInfo("Received file upload request.");
 
@@ -192,11 +192,13 @@ app.post('/api/upload', upload.single('csv-file'), async (req, res) => {
   for (let i = 1; i < fullCsvData.length; i++) {
     const row = fullCsvData[i];
     const title = row[1] ? row[1].trim() : "";
-    const colD = row[3] ? row[3].trim() : "";
-    const colE = row[4] ? row[4].trim() : "";
-    const colF = row[5] ? row[5].trim() : "";
+    const colD = row[3] ? row[3].trim() : ""; // インデックス3: 原産国 (Country)
+    const colE = row[4] ? row[4].trim() : ""; // インデックス4: アーティスト名 (Artist)
+    const colF = row[5] ? row[5].trim() : ""; // インデックス5: リリースタイトル (Release Title)
     
-    if (title !== "" && (colD === "" || colE === "" || colF === "")) {
+    // ★★★ フィルタリングロジックの変更点 ★★★
+    // 「商品タイトル(row[1])が空ではない」AND「原産国(colD)とアーティスト名(colE)とリリースタイトル(colF)の全てが空である」場合に処理対象とする
+    if (title !== "" && (colD === "" && colE === "" && colF === "")) {
       itemsToProcess.push({ originalIndex: i, title: title });
     }
   }
